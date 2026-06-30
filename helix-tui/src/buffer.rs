@@ -1,7 +1,7 @@
 //! Contents of a terminal screen. A [Buffer] is made up of [Cell]s.
 use crate::text::{Span, Spans};
 use helix_core::unicode::width::{UnicodeWidthChar, UnicodeWidthStr};
-use helix_view::graphics::{Color, Modifier, Rect, Style, UnderlineStyle};
+use helix_view::graphics::{BlendOver, Color, Modifier, Rect, Style, UnderlineStyle};
 use std::cmp::min;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -86,14 +86,14 @@ impl Cell {
 
     /// Set the [Style] of the cell
     pub fn set_style(&mut self, style: Style) -> &mut Cell {
-        if let Some(c) = style.fg {
-            self.fg = c;
+        if let Some(bg) = style.bg {
+            self.bg = bg.blend_over(self.bg);
         }
-        if let Some(c) = style.bg {
-            self.bg = c;
+        if let Some(fg) = style.fg {
+            self.fg = fg.blend_over(self.fg);
         }
         if let Some(c) = style.underline_color {
-            self.underline_color = c;
+            self.underline_color = c.blend_over(self.underline_color);
         }
         if let Some(style) = style.underline_style {
             self.underline_style = style;

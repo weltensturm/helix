@@ -298,6 +298,7 @@ pub enum Color {
     LightGray,
     White,
     Rgb(u8, u8, u8),
+    Rgba(u8, u8, u8, u8),
     Indexed(u8),
 }
 
@@ -322,6 +323,38 @@ impl fmt::Display for MalformedHex {
 }
 
 impl Color {
+    /// Approximate RGB for non-RGB variants to support blending.
+    pub fn as_rgb_approx(self) -> (u8, u8, u8) {
+        match self {
+            Color::Rgb(r, g, b) => (r, g, b),
+            Color::Rgba(r, g, b, _) => (r, g, b),
+            Color::Reset => (0, 0, 0),
+            Color::Black => (0, 0, 0),
+            Color::Red => (205, 49, 49),
+            Color::Green => (13, 188, 121),
+            Color::Yellow => (229, 229, 16),
+            Color::Blue => (36, 114, 200),
+            Color::Magenta => (188, 63, 188),
+            Color::Cyan => (17, 168, 205),
+            Color::Gray => (102, 102, 102),
+            Color::LightRed => (241, 76, 76),
+            Color::LightGreen => (35, 209, 139),
+            Color::LightYellow => (245, 245, 67),
+            Color::LightBlue => (59, 142, 234),
+            Color::LightMagenta => (214, 112, 214),
+            Color::LightCyan => (41, 184, 219),
+            Color::LightGray => (204, 204, 204),
+            Color::White => (229, 229, 229),
+            Color::Indexed(i) => match i {
+                0 => (0, 0, 0),
+                7 => (204, 204, 204),
+                8 => (102, 102, 102),
+                15 => (255, 255, 255),
+                _ => (i, i, i),
+            },
+        }
+    }
+
     /// Creates a `Color` from a hex string of the form
     /// "#RRGGBB" or "#RGB"
     ///
@@ -348,21 +381,69 @@ impl Color {
         use dupe_from_nibble as nibble;
 
         match h.len() {
-            7 => match (|| {
+            9 => (|| {
+                Some(Self::Rgba(
+                    pair([h[1], h[2]])?,
+                    pair([h[3], h[4]])?,
+                    pair([h[5], h[6]])?,
+                    pair([h[7], h[8]])?,
+                ))
+            })()
+            .ok_or(MalformedHex::NotANibble),
+
+            7 => (|| {
                 Some(Self::Rgb(
                     pair([h[1], h[2]])?,
                     pair([h[3], h[4]])?,
                     pair([h[5], h[6]])?,
                 ))
-            })() {
-                Some(c) => Ok(c),
-                None => Err(MalformedHex::NotANibble),
-            },
-            4 => match (|| Some(Self::Rgb(nibble(h[1])?, nibble(h[2])?, nibble(h[3])?)))() {
-                Some(c) => Ok(c),
-                None => Err(MalformedHex::NotANibble),
-            },
+            })()
+            .ok_or(MalformedHex::NotANibble),
+
+            4 => (|| Some(Self::Rgb(nibble(h[1])?, nibble(h[2])?, nibble(h[3])?)))()
+                .ok_or(MalformedHex::NotANibble),
+
             _ => Err(MalformedHex::LenOOB),
+        }
+    }
+
+    pub fn alpha(self) -> u8 {
+        match self {
+            Color::Rgba(_, _, _, a) => a,
+            _ => 255,
+        }
+    }
+}
+
+pub trait BlendOver {
+    fn blend_over(self, under: Self) -> Self;
+}
+
+impl BlendOver for Color {
+    // Blend on top of `under`, assume `under` is opaque
+    fn blend_over(self, under: Color) -> Color {
+        match self {
+            Self::Rgba(r, g, b, a) if a < 255 => {
+                let (ur, ug, ub) = under.as_rgb_approx();
+                let a = a as f32 / 255.0;
+                let ia = 1.0 - a;
+                let r = (r as f32 * a + ur as f32 * ia).round().clamp(0.0, 255.0) as u8;
+                let g = (g as f32 * a + ug as f32 * ia).round().clamp(0.0, 255.0) as u8;
+                let b = (b as f32 * a + ub as f32 * ia).round().clamp(0.0, 255.0) as u8;
+                Color::Rgb(r, g, b)
+            }
+            a => a,
+        }
+    }
+}
+
+impl BlendOver for Option<Color> {
+    fn blend_over(self, under: Self) -> Self {
+        match (self, under) {
+            (Some(over), Some(under)) => Some(over.blend_over(under)),
+            (Some(c), None) => Some(c),
+            (None, Some(c)) => Some(c),
+            (None, None) => None,
         }
     }
 }
@@ -390,6 +471,7 @@ impl From<Color> for termina::style::ColorSpec {
             Color::LightGray => Self::WHITE,
             Color::Indexed(i) => Self::PaletteIndex(i),
             Color::Rgb(r, g, b) => termina::style::RgbColor::new(r, g, b).into(),
+            Color::Rgba(r, g, b, _) => termina::style::RgbColor::new(r, g, b).into(),
         }
     }
 }
@@ -419,6 +501,7 @@ impl From<Color> for crossterm::style::Color {
             Color::White => CColor::White,
             Color::Indexed(i) => CColor::AnsiValue(i),
             Color::Rgb(r, g, b) => CColor::Rgb { r, g, b },
+            Color::Rgba(r, g, b, _) => CColor::Rgb { r, g, b },
         }
     }
 }
@@ -737,9 +820,9 @@ impl Style {
     ///     Style::default().patch(combined));
     /// ```
     pub fn patch(mut self, other: Style) -> Style {
-        self.fg = other.fg.or(self.fg);
-        self.bg = other.bg.or(self.bg);
-        self.underline_color = other.underline_color.or(self.underline_color);
+        self.fg = other.fg.blend_over(self.fg);
+        self.bg = other.bg.blend_over(self.bg);
+        self.underline_color = other.underline_color.blend_over(self.underline_color);
         self.underline_style = other.underline_style.or(self.underline_style);
 
         self.add_modifier.remove(other.sub_modifier);
@@ -916,5 +999,13 @@ mod tests {
         ] {
             assert_eq!(Color::from_hex(h), Err(MalformedHex::LenOOB));
         }
+    }
+
+    #[test]
+    fn test_blend_over_half_red_on_black() {
+        let over = Color::Rgba(255, 0, 0, 128);
+        let under = Color::Rgb(0, 0, 0);
+        let blended = over.blend_over(under);
+        assert_eq!(blended, Color::Rgb(128, 0, 0));
     }
 }

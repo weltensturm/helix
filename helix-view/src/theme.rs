@@ -281,6 +281,9 @@ pub struct Theme {
     /// is called many times per frame, so we optimize lookups.
     scope_index: HashMap<String, Highlight>,
     rainbow_length: usize,
+
+    // TODO: remove and use just alpha
+    z_indexes: HashMap<String, i16>,
 }
 
 impl From<Value> for Theme {
@@ -313,6 +316,7 @@ fn build_theme_values(
 ) -> (
     HashMap<String, Style>,
     Vec<String>,
+    HashMap<String, i16>,
     Vec<Style>,
     usize,
     Vec<String>,
@@ -372,7 +376,28 @@ fn build_theme_values(
         highlights.push(style);
     }
 
-    (styles, scopes, highlights, rainbow_length, warnings)
+    let mut z_indexes = HashMap::new();
+    // Set default color Z index (-alpha)
+    for (scope, style) in &styles {
+        let min_alpha = [style.fg, style.bg, style.underline_color]
+            .iter()
+            .map(|a| a.map(Color::alpha).unwrap_or(255))
+            .min()
+            .unwrap_or(255);
+
+        z_indexes
+            .entry(scope.clone())
+            .or_insert(-(min_alpha as i16));
+    }
+
+    (
+        styles,
+        scopes,
+        z_indexes,
+        highlights,
+        rainbow_length,
+        warnings,
+    )
 }
 
 fn default_rainbow() -> Vec<Style> {
@@ -486,7 +511,7 @@ impl Theme {
     }
 
     fn from_keys(toml_keys: Map<String, Value>) -> (Self, Vec<String>) {
-        let (styles, scopes, highlights, rainbow_length, load_errors) =
+        let (styles, scopes, z_indexes, highlights, rainbow_length, load_errors) =
             build_theme_values(toml_keys);
 
         let scope_index = scopes
@@ -501,9 +526,16 @@ impl Theme {
             highlights,
             scope_index,
             rainbow_length,
+            z_indexes,
             ..Default::default()
         };
         (theme, load_errors)
+    }
+
+    pub fn compare_highlights(&self, a: Highlight, b: Highlight) -> std::cmp::Ordering {
+        let za = *self.z_indexes.get(self.scope(a)).unwrap_or(&i16::MIN);
+        let zb = *self.z_indexes.get(self.scope(b)).unwrap_or(&i16::MIN);
+        za.cmp(&zb)
     }
 }
 
@@ -592,7 +624,12 @@ impl ThemePalette {
             .ok_or(format!("Invalid underline style: {}", value))
     }
 
-    pub fn parse_style(&self, style: &mut Style, value: Value) -> Result<(), String> {
+    pub fn parse_style(
+        &self,
+        style: &mut Style,
+        // theme: &mut Theme,
+        value: Value,
+    ) -> Result<(), String> {
         if let Value::Table(entries) = value {
             for (name, mut value) in entries {
                 match name.as_str() {
@@ -622,6 +659,15 @@ impl ThemePalette {
                             }
                         }
                     }
+                    // "z" => {
+                    //     theme.z_indexes.insert(
+                    //         name,
+                    //         value
+                    //             .as_integer()
+                    //             .and_then(|a| a.try_into().ok())
+                    //             .ok_or("Z index should be an i16 integer")?,
+                    //     );
+                    // }
                     _ => return Err(format!("Invalid style attribute: {}", name)),
                 }
             }
@@ -717,6 +763,39 @@ mod tests {
                 .fg(Color::Rgb(255, 255, 255))
                 .bg(Color::Rgb(0, 0, 0))
                 .add_modifier(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn parse_rgba_hex() {
+        let table = toml::toml! {
+            "scope" = { fg = "#ff000080" }
+        };
+        let mut style = Style::default();
+        let palette = ThemePalette::default();
+        for (_name, value) in table {
+            palette.parse_style(&mut style, value).unwrap();
+        }
+        assert_eq!(style.fg, Some(Color::Rgba(255, 0, 0, 128)));
+    }
+
+    #[test]
+    fn compare_scopes_with_z_index() {
+        let value = toml::toml! {
+            ["ui.selection"]
+            bg = "#00000080"
+            z = 20
+
+            ["diagnostic.error"]
+            bg = "#ff0000"
+            z = 10
+        };
+        let (theme, _warns) = Theme::from_toml(toml::Value::Table(value));
+        let sel = theme.find_highlight_exact("ui.selection").unwrap();
+        let err = theme.find_highlight_exact("diagnostic.error").unwrap();
+        assert_eq!(
+            theme.compare_highlights(sel, err),
+            std::cmp::Ordering::Greater
         );
     }
 

@@ -3,7 +3,7 @@ use std::cmp::min;
 use helix_core::doc_formatter::{DocumentFormatter, FormattedGrapheme, GraphemeSource, TextFormat};
 use helix_core::graphemes::Grapheme;
 use helix_core::str_utils::char_to_byte_idx;
-use helix_core::syntax::{self, HighlightEvent, Highlighter, OverlayHighlights};
+use helix_core::syntax::{self, Highlight, HighlightEvent, Highlighter, OverlayHighlights};
 use helix_core::text_annotations::TextAnnotations;
 use helix_core::{visual_offset_from_block, Position, RopeSlice};
 use helix_stdx::rope::RopeSliceExt;
@@ -12,6 +12,7 @@ use helix_view::graphics::Rect;
 use helix_view::theme::Style;
 use helix_view::view::ViewPosition;
 use helix_view::{Document, Theme};
+use smallvec::SmallVec;
 use tui::buffer::Buffer as Surface;
 
 use crate::ui::text_decorations::DecorationManager;
@@ -488,6 +489,7 @@ struct SyntaxHighlighter<'h, 'r, 't> {
     theme: &'t Theme,
     text_style: Style,
     style: Style,
+    highlight_buffer: SmallVec<[Highlight; 8]>,
 }
 
 impl<'h, 'r, 't> SyntaxHighlighter<'h, 'r, 't> {
@@ -504,6 +506,7 @@ impl<'h, 'r, 't> SyntaxHighlighter<'h, 'r, 't> {
             theme,
             style: text_style,
             text_style,
+            highlight_buffer: SmallVec::new(),
         };
         highlighter.update_pos();
         highlighter
@@ -536,8 +539,16 @@ impl<'h, 'r, 't> SyntaxHighlighter<'h, 'r, 't> {
             HighlightEvent::Push => self.style,
         };
 
-        self.style = highlights.fold(base, |acc, highlight| {
-            acc.patch(self.theme.highlight(highlight))
+        self.highlight_buffer.clear();
+        self.highlight_buffer.extend(highlights);
+        // TODO: sort each highlight kind color individually (fg/bg/underline)
+        if self.highlight_buffer.len() > 1 {
+            self.highlight_buffer
+                .sort_by(|a, b| self.theme.compare_highlights(*a, *b));
+        }
+        self.style = self.highlight_buffer.iter().fold(base, |acc, highlight| {
+            self.theme.highlight(*highlight);
+            acc.patch(self.theme.highlight(*highlight))
         });
         self.update_pos();
     }
@@ -548,6 +559,7 @@ struct OverlayHighlighter<'t> {
     pos: usize,
     theme: &'t Theme,
     style: Style,
+    highlight_buffer: SmallVec<[Highlight; 8]>,
 }
 
 impl<'t> OverlayHighlighter<'t> {
@@ -558,6 +570,7 @@ impl<'t> OverlayHighlighter<'t> {
             pos: 0,
             theme,
             style: Style::default(),
+            highlight_buffer: SmallVec::new(),
         };
         highlighter.update_pos();
         highlighter
@@ -574,8 +587,14 @@ impl<'t> OverlayHighlighter<'t> {
             HighlightEvent::Push => self.style,
         };
 
-        self.style = highlights.fold(base, |acc, highlight| {
-            acc.patch(self.theme.highlight(highlight))
+        self.highlight_buffer.clear();
+        self.highlight_buffer.extend(highlights);
+        if self.highlight_buffer.len() > 1 {
+            self.highlight_buffer
+                .sort_by(|a, b| self.theme.compare_highlights(*a, *b));
+        }
+        self.style = self.highlight_buffer.iter().fold(base, |acc, highlight| {
+            acc.patch(self.theme.highlight(*highlight))
         });
         self.update_pos();
     }
